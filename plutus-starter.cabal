@@ -41,7 +41,10 @@ common lang
 library
     import: lang
     exposed-modules:
-      MyModule
+      Trace
+      Faucet.OffChain
+      Faucet.Validator
+      Faucet.Policy
       Plutus.Contracts.Game
     build-depends:
       base >= 4.9 && < 5,
@@ -49,11 +52,15 @@ library
       bytestring,
       containers,
       freer-extras,
+      data-default,
+      text,
       playground-common,
       plutus-contract,
       plutus-tx-plugin,
       plutus-tx,
       plutus-ledger,
+      plutus-ledger-api,
+      containers
     hs-source-dirs: src examples/src
 
 test-suite plutus-example-projects-test
