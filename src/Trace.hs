@@ -14,14 +14,17 @@ import           Data.Functor          (void)
 import           Data.Maybe
 import           Data.Monoid
 import           Data.Text
-import           Faucet.OffChain
-import           Faucet.Validator
+import           Ledger
 import           Plutus.Trace.Emulator as Emulator
-import           Prelude               (Applicative (pure), IO, Monad ((>>)),
-                                        ($))
+import qualified Prelude               as P
 import           Wallet.Emulator
 
-runTrace :: IO ()
+import           Faucet.AdminSide
+import           Faucet.UserSide
+import           Faucet.Validator
+import           Playground.Contract
+
+runTrace :: P.IO ()
 runTrace = runEmulatorTraceIO trace
 
 trace :: EmulatorTrace ()
@@ -32,29 +35,29 @@ trace = do
         wallet4 = knownWallet 4
         rightApiKey = "right api key"
         wrongApiKey = "wrong api key"
-    h1 <- activateContractWallet wallet1 $ endpoints rightApiKey
-    h2 <- activateContractWallet wallet2 $ endpoints rightApiKey
-    h3 <- activateContractWallet wallet3 $ endpoints rightApiKey
-    h4 <- activateContractWallet wallet4 $ endpoints rightApiKey
-    void $ Emulator.waitNSlots 1
-    faucet <- getFaucet h1
-    callEndpoint @"startFaucet" h1 faucet
-    void $ Emulator.waitNSlots 1
+    creator <- activateContractWallet wallet1 P.$ runFaucet (NewFaucet rightApiKey)
+    h1 <- activateContractWallet wallet1 endpoints
+    h2 <- activateContractWallet wallet2 endpoints
+    h3 <- activateContractWallet wallet3 endpoints
+    h4 <- activateContractWallet wallet4 endpoints
+    void P.$ Emulator.waitNSlots 1
+    (v, Faucet cs _) <- getFaucet creator
 
-    callEndpoint @"fundFaucet" h1 $ FundParams faucet 90_000_000
-    void $ Emulator.waitNSlots 2
-    callEndpoint @"fundFaucet" h4 $ FundParams faucet 90_000_000
-    void $ Emulator.waitNSlots 1
-
-    callEndpoint @"getSomeAda" h2 $ GetParams faucet rightApiKey
-    void $ Emulator.waitNSlots 1
-    callEndpoint @"getSomeAda" h3 $ GetParams faucet wrongApiKey
-    void $ Emulator.waitNSlots 5
+    callEndpoint @"fundFaucet" h1 P.$ FundParams cs v 90_000_000
+    void P.$ Emulator.waitNSlots 1
+    callEndpoint @"fundFaucet" h2 P.$ FundParams cs v 90_000_000
+    void P.$ Emulator.waitNSlots 1
+    callEndpoint @"getSomeAda" h4 P.$ GetParams cs v wrongApiKey
+    void P.$ Emulator.waitNSlots 1
+    callEndpoint @"getSomeAda" h3 P.$ GetParams cs v rightApiKey
+    void P.$ Emulator.waitNSlots 100
+    callEndpoint @"getSomeAda" h3 P.$ GetParams cs v rightApiKey
+    void P.$ Emulator.waitNSlots 1
 
   where
-      getFaucet :: ContractHandle (Last Faucet) FaucetSchema Text -> EmulatorTrace Faucet
+      getFaucet :: ContractHandle (Last (Validator, Faucet)) (Endpoint "" ()) Text -> EmulatorTrace (Validator, Faucet)
       getFaucet h = do
           l <- observableState h
           case l of
-              Last Nothing       -> waitNSlots 1 >> getFaucet h
-              Last (Just faucet) -> pure faucet
+              Last Nothing       -> waitNSlots 1 P.>> getFaucet h
+              Last (Just faucet) -> P.pure faucet

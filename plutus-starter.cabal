@@ -42,10 +42,10 @@ library
     import: lang
     exposed-modules:
       Trace
-      Faucet.OffChain
+      Faucet.AdminSide
+      Faucet.UserSide
       Faucet.Validator
       Faucet.Policy
-      Plutus.Contracts.Game
     build-depends:
       base >= 4.9 && < 5,
       aeson,

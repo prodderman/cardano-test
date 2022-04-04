@@ -27,18 +27,28 @@ import qualified Prelude              as P
 
 import qualified Faucet.Policy        as Policy
 
+type ApiKey = PlutusTx.Prelude.BuiltinByteString
+
 data Faucet = Faucet
   { fCurrencySymbol :: !CurrencySymbol
   , fApiKey         :: !ApiKey
   }  deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
 
-type ApiKey = PlutusTx.Prelude.BuiltinByteString
-type ConsumeDatum = PMap.Map PubKeyHash POSIXTime
+data ConsumeDatum = ConsumeDatum
+  { book       :: PMap.Map PubKeyHash POSIXTime
+  , apiKeyHash :: BuiltinByteString
+  } deriving (P.Show)
+
+instance Eq ConsumeDatum where
+    {-# INLINABLE (==) #-}
+    a == b = (book a == book b) && (apiKeyHash a == apiKeyHash b)
+
 data FaucetAction = Fund | Use PlutusTx.Prelude.BuiltinByteString deriving P.Show
 
 PlutusTx.makeLift ''Faucet
 PlutusTx.unstableMakeIsData ''Faucet
 PlutusTx.unstableMakeIsData ''FaucetAction
+PlutusTx.unstableMakeIsData ''ConsumeDatum
 
 {-# INLINABLE allowedAmount #-}
 allowedAmount :: Value
@@ -50,13 +60,14 @@ allowedAmountWithRightApiKey = lovelaceValueOf 10_000_000
 
 {-# INLINABLE waitingTime #-}
 waitingTime :: POSIXTime
-waitingTime = POSIXTime (5 * 60 * 1000) -- five minutes
+waitingTime = POSIXTime (60 * 1000)
 
 {-# INLINABLE mkValidator #-}
 mkValidator :: Faucet -> ConsumeDatum -> FaucetAction -> ScriptContext -> Bool
 mkValidator Faucet {..} datum action ctx =
   traceIfFalse "token missing from input" inputHasToken &&
   traceIfFalse "token missing from output" outputHasToken &&
+  traceIfFalse "api key changed" apiKeyHashTheSame &&
   case action of
     Fund -> traceIfFalse "datum changed" $ outputDatum == datum &&
             traceIfFalse "faucet is not funded" hasFunded
@@ -102,22 +113,25 @@ mkValidator Faucet {..} datum action ctx =
           Datum d <- txOutDatum ownOutput >>= findDatumByHash
           PlutusTx.fromBuiltinData d
 
+    apiKeyHashTheSame :: Bool
+    apiKeyHashTheSame = apiKeyHash datum == apiKeyHash outputDatum
+
     hasFunded :: Bool
     hasFunded = outputBalance `geq` inputBalance
 
     canConsume :: Bool
-    canConsume = all (\deadline -> from (deadline + waitingTime) `contains` range) $ getSignersDeadlinesFromDatum datum
+    canConsume = all (\deadline -> (deadline + waitingTime) `before` range) $ getSignersDeadlinesFromDatum $ book datum
 
     allSignersIncluded :: Bool
-    allSignersIncluded = all (`PMap.member` outputDatum) signers
+    allSignersIncluded = all (`PMap.member` book outputDatum) signers
 
     signersDeadlinesValid :: Bool
-    signersDeadlinesValid = all (`Ledger.member` range) $ getSignersDeadlinesFromDatum outputDatum
+    signersDeadlinesValid = all (`Ledger.member` range) $ getSignersDeadlinesFromDatum $ book outputDatum
 
     thereAreNoExtraSigners :: Bool
     thereAreNoExtraSigners = all (`elem` signers) newSigners
       where
-        newSigners = filter (\x ->  (not . elem x) (PMap.keys datum)) (PMap.keys outputDatum)
+        newSigners = filter (\x ->  (not . elem x) (PMap.keys $ book datum)) (PMap.keys $ book outputDatum)
 
     rightAmount :: ApiKey -> Bool
     rightAmount ak
@@ -125,7 +139,7 @@ mkValidator Faucet {..} datum action ctx =
       | ak /= fApiKey && inputBalance - outputBalance == allowedAmount = True
       | otherwise = False
 
-    getSignersDeadlinesFromDatum d = [deadline | (pkhInBook, deadline) <- PMap.toList d, signerPkh <- signers, pkhInBook == signerPkh]
+    getSignersDeadlinesFromDatum b = [deadline | (pkhInBook, deadline) <- PMap.toList b, signerPkh <- signers, pkhInBook == signerPkh]
 
 data FaucetType
 instance Scripts.ValidatorTypes FaucetType where
