@@ -3,7 +3,6 @@
 {-# LANGUAGE DeriveGeneric       #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE NoImplicitPrelude   #-}
-{-# LANGUAGE NumericUnderscores  #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -54,10 +53,7 @@ createFaucet :: Validator.ApiKey -> Contract w FaucetSchema Text Validator.Fauce
 createFaucet apiKey = do
   cs <- mintForFaucet
   Contract.logInfo @P.String $ printf "faucet currency symbol %s" (P.show cs)
-  pure $ Validator.Faucet
-              { Validator.currencySymbol = cs
-              , Validator.apiKey = apiKey
-              }
+  pure $ Validator.Faucet cs apiKey
 
 startFaucet :: Validator.Faucet -> Contract w FaucetSchema Text ()
 startFaucet faucet@(Validator.Faucet cs _) = do
@@ -73,12 +69,14 @@ fundFaucet (FundParams faucet amount) = do
   case faucetInfo of
     Nothing -> Contract.logInfo @P.String $ printf "faucet not found"
     Just (oref, txOut, datum) -> do
-      let v = lovelaceValueOf amount <> assetClassValue (Policy.faucetAsset $ Validator.currencySymbol faucet) 1
-          validator = Validator.validator faucet
+      let faucetBalance = _ciTxOutValue txOut
+          newBalance = lovelaceValueOf amount + faucetBalance
+      when (faucetBalance `lt` newBalance) $ throwError "wrong balance"
+      let validator = Validator.validator faucet
           lookups = Constraints.otherScript validator <>
                     Constraints.unspentOutputs (Map.singleton oref txOut)
           tx = Constraints.mustSpendScriptOutput oref (Redeemer (PlutusTx.toBuiltinData Validator.Fund)) <>
-               Constraints.mustPayToOtherScript (validatorHash validator) (Datum $ PlutusTx.toBuiltinData datum) v
+               Constraints.mustPayToOtherScript (validatorHash validator) (Datum $ PlutusTx.toBuiltinData datum) newBalance
       ledgerTx <- submitTxConstraintsWith @Validator.FaucetType lookups tx
       awaitTxConfirmed $ getCardanoTxId ledgerTx
       Contract.logInfo @P.String $ printf "faucet has funded"
@@ -86,7 +84,24 @@ fundFaucet (FundParams faucet amount) = do
 getSomeAda :: GetParams -> Contract w FaucetSchema Text ()
 getSomeAda (GetParams faucet apiKey) = do
   Contract.logInfo @P.String $ printf "getting from the faucet"
-
+  faucetInfo <- findFaucet faucet
+  case faucetInfo of
+    Nothing -> Contract.logInfo @P.String $ printf "faucet not found"
+    Just (oref, txOut, datum) -> do
+      let faucetBalance = _ciTxOutValue txOut
+          valueToConsume = if Validator.fApiKey faucet == apiKey
+            then Validator.allowedAmountWithRightApiKey
+            else Validator.allowedAmount
+          change = faucetBalance - valueToConsume
+          validator = Validator.validator faucet
+          lookups = Constraints.otherScript validator <>
+                    Constraints.unspentOutputs (Map.singleton oref txOut)
+          tx = Constraints.mustSpendScriptOutput oref (Redeemer (PlutusTx.toBuiltinData $ Validator.Use apiKey)) <>
+               Constraints.mustPayToOtherScript (validatorHash validator) (Datum $ PlutusTx.toBuiltinData datum) change
+      Contract.logInfo @P.String $ printf "faucet balance %s" (P.show faucetBalance)
+      Contract.logInfo @P.String $ printf "faucet change %s" (P.show change)
+      ledgerTx <- submitTxConstraintsWith @Validator.FaucetType lookups tx
+      awaitTxConfirmed $ getCardanoTxId ledgerTx
 
 mintForFaucet :: Contract w FaucetSchema Text CurrencySymbol
 mintForFaucet = do
@@ -118,6 +133,8 @@ findFaucet params@(Validator.Faucet cs _) = do
 
 endpoints :: Validator.ApiKey -> Contract (Last Validator.Faucet) FaucetSchema Text ()
 endpoints apiKey = do
+  t <- currentTime
+  Contract.logInfo @P.String $ printf "current time %s" (P.show t)
   faucet <- createFaucet apiKey
   tell $ Last $ Just faucet
   start faucet
