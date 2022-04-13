@@ -41,21 +41,21 @@ trace = do
     h3 <- activateContractWallet wallet3 endpoints
     h4 <- activateContractWallet wallet4 endpoints
     void P.$ Emulator.waitNSlots 1
-    (v, Faucet cs _) <- getFaucet creator
+    Faucet cs <- getFaucet creator
 
-    callEndpoint @"fundFaucet" h1 P.$ FundParams cs v 90_000_000
+    callEndpoint @"fundFaucet" h1 P.$ FundParams cs 90_000_000
     void P.$ Emulator.waitNSlots 1
-    callEndpoint @"fundFaucet" h2 P.$ FundParams cs v 90_000_000
+    callEndpoint @"fundFaucet" h2 P.$ FundParams cs 90_000_000
     void P.$ Emulator.waitNSlots 1
-    callEndpoint @"getSomeAda" h4 P.$ GetParams cs v wrongApiKey
+    callEndpoint @"getSomeAda" h4 P.$ GetParams cs wrongApiKey
     void P.$ Emulator.waitNSlots 1
-    callEndpoint @"getSomeAda" h3 P.$ GetParams cs v rightApiKey
+    callEndpoint @"getSomeAda" h3 P.$ GetParams cs rightApiKey
     void P.$ Emulator.waitNSlots 100
-    callEndpoint @"getSomeAda" h3 P.$ GetParams cs v rightApiKey
+    callEndpoint @"getSomeAda" h3 P.$ GetParams cs rightApiKey
     void P.$ Emulator.waitNSlots 1
 
   where
-      getFaucet :: ContractHandle (Last (Validator, Faucet)) (Endpoint "" ()) Text -> EmulatorTrace (Validator, Faucet)
+      getFaucet :: ContractHandle (Last Faucet) (Endpoint "" ()) Text -> EmulatorTrace Faucet
       getFaucet h = do
           l <- observableState h
           case l of

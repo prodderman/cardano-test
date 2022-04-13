@@ -33,13 +33,11 @@ import qualified Faucet.Validator    as Validator
 
 data FundParams = FundParams
   { fCurrencySymbol :: CurrencySymbol
-  , fValidator      :: Validator
   , fAmount         :: Integer
   } deriving (P.Show, Generic, ToJSON, FromJSON)
 
 data GetParams = GetParams
   { gCurrencySymbol :: CurrencySymbol
-  , gAddress        :: Validator
   , gApiKey         :: Validator.ApiKey
   } deriving
    (P.Show, Generic, ToJSON, FromJSON)
@@ -49,13 +47,14 @@ type FaucetSchema =
   Endpoint "getSomeAda" GetParams
 
 fundFaucet :: FundParams -> Contract w FaucetSchema Text ()
-fundFaucet (FundParams cs validator amount) = do
+fundFaucet (FundParams cs amount) = do
   Contract.logInfo @P.String $ printf "funding the faucet"
-  faucetInfo <- findFaucet validator cs
+  faucetInfo <- findFaucet cs
   case faucetInfo of
     Nothing -> throwError "faucet not found"
     Just (oref, txOut, datum) -> do
-      let faucetBalance = _ciTxOutValue txOut
+      let validator = Validator.validator $ Validator.Faucet cs
+          faucetBalance = _ciTxOutValue txOut
           newBalance = lovelaceValueOf amount + faucetBalance
       when (faucetBalance `lt` newBalance) $ throwError "wrong balance"
       let lookups = Constraints.otherScript validator <>
@@ -67,15 +66,16 @@ fundFaucet (FundParams cs validator amount) = do
       Contract.logInfo @P.String $ printf "faucet has funded"
 
 getSomeAda :: GetParams -> Contract w FaucetSchema Text ()
-getSomeAda (GetParams cs validator apiKey) = do
+getSomeAda (GetParams cs apiKey) = do
   Contract.logInfo @P.String $ printf "getting from the faucet"
-  faucetInfo <- findFaucet validator cs
+  faucetInfo <- findFaucet cs
   now <- currentTime
   pkh <- ownPubKeyHash
   case faucetInfo of
     Nothing -> Contract.logInfo @P.String $ printf "faucet not found"
     Just (oref, txOut, datum) -> do
-      let faucetBalance = _ciTxOutValue txOut
+      let validator = Validator.validator $ Validator.Faucet cs
+          faucetBalance = _ciTxOutValue txOut
           apiKeyHash = sha3_256 apiKey
           valueToConsume = if apiKeyHash == Validator.apiKeyHash datum
             then Validator.allowedAmountWithRightApiKey
@@ -92,9 +92,9 @@ getSomeAda (GetParams cs validator apiKey) = do
       ledgerTx <- submitTxConstraintsWith @Validator.FaucetType lookups tx
       awaitTxConfirmed $ getCardanoTxId ledgerTx
 
-findFaucet :: Validator -> CurrencySymbol -> Contract w s Text (Maybe (TxOutRef, ChainIndexTxOut, Validator.ConsumeDatum))
-findFaucet validator cs = do
-  utxos <- Contract.utxosAt $ scriptAddress validator
+findFaucet :: CurrencySymbol -> Contract w s Text (Maybe (TxOutRef, ChainIndexTxOut, Validator.ConsumeDatum))
+findFaucet cs = do
+  utxos <- Contract.utxosAt $ Validator.scrAddress $ Validator.Faucet cs
   let faucetInfo = [ (oref, txOut)
             | (oref, txOut) <- Map.toList utxos
             , Value.valueOf (_ciTxOutValue txOut) cs Policy.faucetTokenName == 1

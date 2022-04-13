@@ -27,23 +27,22 @@ import qualified Prelude              as P
 
 import qualified Faucet.Policy        as Policy
 
-type ApiKey = PlutusTx.Prelude.BuiltinByteString
+type ApiKey = BuiltinByteString
+type ApiKeyHash = BuiltinByteString
 
-data Faucet = Faucet
-  { fCurrencySymbol :: !CurrencySymbol
-  , fApiKey         :: !ApiKey
-  }  deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
+newtype Faucet = Faucet { fCurrencySymbol :: CurrencySymbol }
+  deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
 
 data ConsumeDatum = ConsumeDatum
   { book       :: PMap.Map PubKeyHash POSIXTime
-  , apiKeyHash :: BuiltinByteString
+  , apiKeyHash :: ApiKeyHash
   } deriving (P.Show)
 
 instance Eq ConsumeDatum where
     {-# INLINABLE (==) #-}
     a == b = (book a == book b) && (apiKeyHash a == apiKeyHash b)
 
-data FaucetAction = Fund | Use PlutusTx.Prelude.BuiltinByteString deriving P.Show
+data FaucetAction = Fund | Use ApiKey deriving P.Show
 
 PlutusTx.makeLift ''Faucet
 PlutusTx.unstableMakeIsData ''Faucet
@@ -80,6 +79,7 @@ mkValidator Faucet {..} datum action ctx =
     txInfo = scriptContextTxInfo ctx
     range = txInfoValidRange txInfo
     signers = txInfoSignatories txInfo
+    ownApiKeyHash = apiKeyHash datum
 
     ownInput :: TxOut
     ownInput = case findOwnInput ctx of
@@ -113,6 +113,9 @@ mkValidator Faucet {..} datum action ctx =
           Datum d <- txOutDatum ownOutput >>= findDatumByHash
           PlutusTx.fromBuiltinData d
 
+    rangeValid :: Bool
+    rangeValid = False
+
     apiKeyHashTheSame :: Bool
     apiKeyHashTheSame = apiKeyHash datum == apiKeyHash outputDatum
 
@@ -134,10 +137,12 @@ mkValidator Faucet {..} datum action ctx =
         newSigners = filter (\x ->  (not . elem x) (PMap.keys $ book datum)) (PMap.keys $ book outputDatum)
 
     rightAmount :: ApiKey -> Bool
-    rightAmount ak
-      | ak == fApiKey && inputBalance - outputBalance == allowedAmountWithRightApiKey = True
-      | ak /= fApiKey && inputBalance - outputBalance == allowedAmount = True
+    rightAmount apiKey
+      | apiKeyHash == ownApiKeyHash && inputBalance - outputBalance == allowedAmountWithRightApiKey = True
+      | apiKeyHash /= ownApiKeyHash && inputBalance - outputBalance == allowedAmount = True
       | otherwise = False
+      where
+        apiKeyHash = sha3_256 apiKey
 
     getSignersDeadlinesFromDatum b = [deadline | (pkhInBook, deadline) <- PMap.toList b, signerPkh <- signers, pkhInBook == signerPkh]
 
