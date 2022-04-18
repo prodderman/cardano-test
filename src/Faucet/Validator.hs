@@ -28,21 +28,23 @@ import qualified Prelude              as P
 import qualified Faucet.Policy        as Policy
 
 type ApiKey = BuiltinByteString
-type ApiKeyHash = BuiltinByteString
 
-newtype Faucet = Faucet { fCurrencySymbol :: CurrencySymbol }
+data Faucet = Faucet
+  { fCurrencySymbol :: !CurrencySymbol
+  , fOwner          :: !PubKeyHash
+  , fApiKey         :: !ApiKey
+  }
   deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
 
-data ConsumeDatum = ConsumeDatum
+newtype ConsumeDatum = ConsumeDatum
   { book       :: PMap.Map PubKeyHash POSIXTime
-  , apiKeyHash :: ApiKeyHash
   } deriving (P.Show)
 
 instance Eq ConsumeDatum where
     {-# INLINABLE (==) #-}
-    a == b = (book a == book b) && (apiKeyHash a == apiKeyHash b)
+    a == b = book a == book b
 
-data FaucetAction = Fund | Use ApiKey deriving P.Show
+data FaucetAction = Fund | Use PubKeyHash (Maybe ApiKey) deriving P.Show
 
 PlutusTx.makeLift ''Faucet
 PlutusTx.unstableMakeIsData ''Faucet
@@ -64,22 +66,22 @@ waitingTime = POSIXTime (60 * 1000)
 {-# INLINABLE mkValidator #-}
 mkValidator :: Faucet -> ConsumeDatum -> FaucetAction -> ScriptContext -> Bool
 mkValidator Faucet {..} datum action ctx =
-  traceIfFalse "token missing from input" inputHasToken &&
-  traceIfFalse "token missing from output" outputHasToken &&
-  traceIfFalse "api key changed" apiKeyHashTheSame &&
+  traceIfFalse "Wrong signature" signedByOwner &&
+  traceIfFalse "Token missing from input" inputHasToken &&
+  traceIfFalse "Token missing from output" outputHasToken &&
   case action of
-    Fund -> traceIfFalse "datum changed" $ outputDatum == datum &&
-            traceIfFalse "faucet is not funded" hasFunded
-    Use ak -> traceIfFalse "it is not yet time" canConsume &&
-              traceIfFalse "wrong amount" (rightAmount ak) &&
-              traceIfFalse "not all signers are included in datum" allSignersIncluded &&
-              traceIfFalse "deadlines for all signers are not correct" signersDeadlinesValid &&
-              traceIfFalse "there can't be extra signers" thereAreNoExtraSigners
+    Fund -> traceIfFalse "Datum changed" $ outputDatum == datum &&
+            traceIfFalse "Faucet is not funded" hasFunded
+    Use addr ak ->
+            traceIfFalse "Wrong time range" rangeValid &&
+            traceIfFalse "It is not yet time" (canConsume addr) &&
+            traceIfFalse "Wrong amount" (rightAmount ak) &&
+            traceIfFalse "Not all signers are included in datum" (newAddrIncluded addr) &&
+            traceIfFalse "Deadlines for all signers are not correct" (isDeadlineValid addr) &&
+            traceIfFalse "There can't be extra signers" (thereAreNoExtraRecords addr)
   where
     txInfo = scriptContextTxInfo ctx
     range = txInfoValidRange txInfo
-    signers = txInfoSignatories txInfo
-    ownApiKeyHash = apiKeyHash datum
 
     ownInput :: TxOut
     ownInput = case findOwnInput ctx of
@@ -113,38 +115,50 @@ mkValidator Faucet {..} datum action ctx =
           Datum d <- txOutDatum ownOutput >>= findDatumByHash
           PlutusTx.fromBuiltinData d
 
-    rangeValid :: Bool
-    rangeValid = False
+    signedByOwner :: Bool
+    signedByOwner = txSignedBy txInfo fOwner
 
-    apiKeyHashTheSame :: Bool
-    apiKeyHashTheSame = apiKeyHash datum == apiKeyHash outputDatum
+    rangeValid :: Bool
+    rangeValid = toTime - fromTime <= 10000
+      where
+        fromTime = case ivFrom range of
+          LowerBound (Finite t) _ -> t
+          _                       -> traceError "Invalid time range"
+        toTime = case ivTo range of
+          UpperBound (Finite t) _ -> t
+          _                       -> traceError "Invalid time range"
 
     hasFunded :: Bool
     hasFunded = outputBalance `geq` inputBalance
 
-    canConsume :: Bool
-    canConsume = all (\deadline -> (deadline + waitingTime) `before` range) $ getSignersDeadlinesFromDatum $ book datum
+    canConsume :: PubKeyHash -> Bool
+    canConsume addr = case getDeadline addr $ book datum of
+      Just dl -> (dl + waitingTime) `before` range
+      Nothing -> True
 
-    allSignersIncluded :: Bool
-    allSignersIncluded = all (`PMap.member` book outputDatum) signers
+    newAddrIncluded :: PubKeyHash -> Bool
+    newAddrIncluded addr = addr `PMap.member` book outputDatum
 
-    signersDeadlinesValid :: Bool
-    signersDeadlinesValid = all (`Ledger.member` range) $ getSignersDeadlinesFromDatum $ book outputDatum
+    isDeadlineValid :: PubKeyHash ->  Bool
+    isDeadlineValid addr = case getDeadline addr (book outputDatum) of
+      Just dl -> dl `Ledger.member` range
+      Nothing -> traceError "Address is not specified"
 
-    thereAreNoExtraSigners :: Bool
-    thereAreNoExtraSigners = all (`elem` signers) newSigners
+    thereAreNoExtraRecords :: PubKeyHash ->  Bool
+    thereAreNoExtraRecords addr = length newRecord == 1 && addr `elem` newRecord
       where
-        newSigners = filter (\x ->  (not . elem x) (PMap.keys $ book datum)) (PMap.keys $ book outputDatum)
+        newRecord = filter (\x ->  (not . elem x) inputAddresses || x == addr) outAddresses
+        inputAddresses = PMap.keys $ book datum
+        outAddresses = PMap.keys $ book outputDatum
 
-    rightAmount :: ApiKey -> Bool
-    rightAmount apiKey
-      | apiKeyHash == ownApiKeyHash && inputBalance - outputBalance == allowedAmountWithRightApiKey = True
-      | apiKeyHash /= ownApiKeyHash && inputBalance - outputBalance == allowedAmount = True
-      | otherwise = False
-      where
-        apiKeyHash = sha3_256 apiKey
+    rightAmount :: Maybe ApiKey -> Bool
+    rightAmount mApiKey = case mApiKey of
+      Nothing -> inputBalance - outputBalance == allowedAmount
+      Just ak | ak == fApiKey && inputBalance - outputBalance == allowedAmountWithRightApiKey -> True
+              | ak /= fApiKey && inputBalance - outputBalance == allowedAmount -> True
+              | otherwise -> False
 
-    getSignersDeadlinesFromDatum b = [deadline | (pkhInBook, deadline) <- PMap.toList b, signerPkh <- signers, pkhInBook == signerPkh]
+    getDeadline addr b = addr `PMap.lookup` b
 
 data FaucetType
 instance Scripts.ValidatorTypes FaucetType where

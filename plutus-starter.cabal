@@ -42,8 +42,7 @@ library
     import: lang
     exposed-modules:
       Trace
-      Faucet.AdminSide
-      Faucet.UserSide
+      Faucet.OffChain
       Faucet.Validator
       Faucet.Policy
     build-depends:
